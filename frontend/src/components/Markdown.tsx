@@ -27,8 +27,10 @@ function inline(text: string, key: string, onCitation?: (index: number) => void)
   let cursor = 0;
   let match: RegExpExecArray | null;
   let n = 0;
-  INLINE.lastIndex = 0;
-  while ((match = INLINE.exec(text))) {
+  // inline() recurses, so each call needs its own matcher: sharing one regex object lets the
+  // recursive call rewind lastIndex and the caller then re-matches the same token forever.
+  const pattern = new RegExp(INLINE.source, "g");
+  while ((match = pattern.exec(text))) {
     if (match.index > cursor) nodes.push(text.slice(cursor, match.index));
     const id = `${key}-i${n++}`;
     if (match[2]) nodes.push(<strong key={id} className="font-semibold text-ink">{inline(match[2], id, onCitation)}</strong>);
@@ -49,8 +51,9 @@ function inline(text: string, key: string, onCitation?: (index: number) => void)
         ),
       );
     } else if (match[14]) nodes.push(<s key={id} className="text-dim">{match[14]}</s>);
-    else if (match[16]) {
-      const index = Number(match[16]);
+    else if (match[17]) {
+      // Group 16 is the whole "[n]" token; only the inner group carries the bare digits.
+      const index = Number(match[17]);
       nodes.push(
         onCitation ? (
           <button key={id} type="button" onClick={() => onCitation(index)} className="citation-ref" title={`Open evidence ${index}`}>

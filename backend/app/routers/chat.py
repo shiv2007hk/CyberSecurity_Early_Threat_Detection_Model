@@ -314,6 +314,13 @@ def stream(request: Request, payload: ChatRequest, user: User = Depends(require_
                                     citations=citations, record_count=record_count, status="incomplete",
                                     model=settings.deepseek_model)
             db.add(assistant)
+            if needs_title:
+                # The title comes from the question alone, so it holds even if the reply is
+                # stopped or fails; gating it on completion left first turns titled "New chat".
+                head = db.get(ChatConversation, conversation_id)
+                if head:
+                    head.title = chat_service.generate_title(message)
+                    head.title_source = "question"
             db.commit()
             assistant_id = assistant.id
 
@@ -336,6 +343,9 @@ def stream(request: Request, payload: ChatRequest, user: User = Depends(require_
                     yield _sse("delta", {"text": delta})
                     if len(collected) % FLUSH_EVERY == 0:
                         assistant.content = "".join(collected)
+                        # A row that already carries text is a partial reply rather than a
+                        # placeholder, so an abort before the final commit reads back as "stopped".
+                        assistant.status = "stopped"
                         db.commit()
             except deepseek.DeepSeekError as exc:
                 status_value, error_text = "failed", exc.message
@@ -356,9 +366,6 @@ def stream(request: Request, payload: ChatRequest, user: User = Depends(require_
             conversation = db.get(ChatConversation, conversation_id)
             if conversation:
                 conversation.updated_at = utcnow()
-                if needs_title and status_value == "complete" and assistant.content.strip():
-                    conversation.title = chat_service.generate_title(message)
-                    conversation.title_source = "question"
             db.commit()
             db.refresh(assistant)
             settled = True
@@ -373,7 +380,7 @@ def stream(request: Request, payload: ChatRequest, user: User = Depends(require_
             if not settled and assistant_id is not None:
                 try:
                     row = db.get(ChatMessage, assistant_id)
-                    if row and row.status == "incomplete":
+                    if row and row.status in ("incomplete", "stopped"):
                         row.content = "".join(collected)
                         row.status = "stopped"
                         db.commit()

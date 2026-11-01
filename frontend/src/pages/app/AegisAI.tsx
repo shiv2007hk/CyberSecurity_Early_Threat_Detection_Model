@@ -290,6 +290,7 @@ export default function AegisAI() {
   });
   const [draft, setDraft] = useState("");
   const [live, setLive] = useState<ChatMessage | null>(null);
+  const [liveId, setLiveId] = useState<number | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [testing, setTesting] = useState(false);
   const [lastQuestion, setLastQuestion] = useState("");
@@ -323,8 +324,11 @@ export default function AegisAI() {
 
   const messages = useMemo<ChatMessage[]>(() => {
     const stored = detailQuery.data?.messages ?? [];
-    return live ? [...stored, live] : stored;
-  }, [detailQuery.data, live]);
+    if (!live) return stored;
+    // The reply row is created before the first token, so a mid-stream refetch already carries it;
+    // keep the streamed bubble and drop its persisted twin.
+    return [...stored.filter((m) => m.id !== liveId), live];
+  }, [detailQuery.data, live, liveId]);
 
   const status = statusQuery.data;
 
@@ -346,6 +350,33 @@ export default function AegisAI() {
     const next = new URLSearchParams(params);
     if (id) next.set("chat", String(id));
     else next.delete("chat");
+    setParams(next, { replace: true });
+  };
+
+  // A stopped reply is committed server-side just after the socket closes, so settle the cached row
+  // with the text that was actually on screen; the delayed refetch reconciles with the stored copy.
+  const settleStopped = (conversation: number | null, rowId: number, text: string) => {
+    if (conversation == null) return;
+    queryClient.setQueryData<Conversation>(["chat-conversation", conversation], (cached) =>
+      cached
+        ? {
+            ...cached,
+            messages: cached.messages.map((m) =>
+              m.id === rowId && m.status === "incomplete"
+                ? { ...m, content: text, status: "stopped" as const }
+                : m,
+            ),
+          }
+        : cached,
+    );
+  };
+
+  // The server creates the conversation on the first token: adopt its id and URL without clearing
+  // the live bubble, otherwise the streamed answer disappears until the stream closes.
+  const adoptConversation = (id: number) => {
+    setConversationId(id);
+    const next = new URLSearchParams(params);
+    next.set("chat", String(id));
     setParams(next, { replace: true });
   };
 
@@ -371,12 +402,19 @@ export default function AegisAI() {
       });
 
       let failure = "";
+      let streamed = "";
+      let activeId = conversationId;
+      let messageId: number | null = null;
       try {
         for await (const event of streamChat({ message, conversation_id: conversationId }, controller.signal)) {
           if (event.type === "meta") {
-            if (conversationId == null) selectConversation(event.conversation_id);
+            if (conversationId == null) adoptConversation(event.conversation_id);
+            activeId = event.conversation_id;
+            messageId = event.message_id;
+            setLiveId(event.message_id);
             setLive((prev) => (prev ? { ...prev, citations: event.citations, record_count: event.record_count, model: event.model } : prev));
           } else if (event.type === "delta") {
+            streamed += event.text;
             setLive((prev) => (prev ? { ...prev, content: prev.content + event.text } : prev));
           } else if (event.type === "error") {
             failure = event.message;
@@ -394,7 +432,12 @@ export default function AegisAI() {
       if (failure) {
         setLive((prev) => (prev ? { ...prev, status: "failed", error: failure } : prev));
       } else {
+        if (controller.signal.aborted && messageId != null) settleStopped(activeId, messageId, streamed);
         setLive(null);
+        if (controller.signal.aborted && activeId != null) {
+          const key = ["chat-conversation", activeId];
+          setTimeout(() => queryClient.invalidateQueries({ queryKey: key }), 800);
+        }
       }
       // The persisted row is the source of truth once the stream closes, including on a failure.
       queryClient.invalidateQueries({ queryKey: ["chat-conversation", conversationId] });

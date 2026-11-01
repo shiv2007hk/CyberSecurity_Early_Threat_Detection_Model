@@ -151,6 +151,8 @@ def test_disconnect_keeps_a_stopped_reply(client, analyst_headers, with_key, mon
     assert assistant, "a half-delivered reply must still be written to the thread"
     assert assistant[-1]["content"] == "alpha beta gamma"
     assert assistant[-1]["status"] == "stopped"
+    thread = client.get(f"/api/chat/conversations/{conversation_id}", headers=analyst_headers).json()
+    assert thread["title"] != "New chat", "a stopped first turn still deserves its question as a title"
 
 
 def test_chat_is_analyst_only_and_rate_limited(client, analyst_headers, viewer_headers, with_key, monkeypatch):

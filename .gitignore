@@ -21,7 +21,7 @@ frontend/.env.local
 .tmp/
 .impeccable/
 _archive/
-_*.py
+/_*.py
 _mock_requests.jsonl
 
 # OS / editor
